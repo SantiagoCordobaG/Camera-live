@@ -84,8 +84,10 @@ Notas:
   podés elegir otra fuente sin recargar.
 - El espejo viene activado por defecto (útil para autoview). Con **M** lo
   apagás si querés la imagen tal cual la entrega OBS.
-- Calidad: aunque LensLink mande 4K, el shader trabaja a ~1440 px de ancho como
-  máximo. Es intencional para mantener el tiempo real.
+- Calidad: la app elige un perfil según el equipo (en teléfono baja la
+  resolución interna, las muestras del shader y la frecuencia del tracker). Si
+  no llega a ~27 fps, baja un escalón sola. Para comparar podés forzar un
+  perfil con `?q=high`, `?q=mid` o `?q=low`.
 
 ---
 

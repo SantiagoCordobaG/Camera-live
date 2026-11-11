@@ -33,7 +33,7 @@ const WEAK_DEVICE =
 
 const TIERS = {
   high: { renderScale: 1, maxWidth: 1440, taps: 8, detectMs: 33, glow: true, dprCap: 2 },
-  mid: { renderScale: 1, maxWidth: 960, taps: 5, detectMs: 45, glow: true, dprCap: 2 },
+  mid: { renderScale: 1, maxWidth: 960, taps: 5, detectMs: 45, glow: false, dprCap: 2 },
   low: { renderScale: 0.75, maxWidth: 760, taps: 3, detectMs: 66, glow: false, dprCap: 1.5 },
 };
 const TIER_ORDER = ["low", "mid", "high"];
@@ -742,15 +742,15 @@ function applyQuality() {
   resize(state.srcW, state.srcH);
 }
 
-// Si el equipo no sostiene ~24 fps durante unos segundos, bajamos un escalón.
+// Si el equipo no sostiene ~27 fps durante unos segundos, bajamos un escalón.
 // Solo se baja, nunca se sube: así no oscila entre perfiles.
 function adaptQuality(now) {
   if (params.has("q") || state.demo) return;
   if (tierName === "low") return;
   if (now - state.startedAt < 4000) return;
 
-  if (state.fps >= 24) {
-    if (state.fps > 30) state.slowSince = 0;
+  if (state.fps >= 27) {
+    if (state.fps > 34) state.slowSince = 0;
     return;
   }
   if (!state.slowSince) {
@@ -1007,11 +1007,17 @@ function cameraName(device, index) {
 function cameraConstraints(deviceId) {
   // En el celular pedimos 960x540 / 30 fps: alcanza de sobra para detectar
   // manos y baja a la mitad el costo de subir la textura a la GPU.
+  // Si el tracker corre en CPU (Safari/iOS), bajamos todavía más: el cuello de
+  // botella pasa a ser la inferencia y no tiene sentido alimentarla con más
+  // píxeles de los que el modelo usa.
   const hi = quality().maxWidth >= 1100;
+  const cpu = state.trackerDelegate === "CPU";
+  const w = hi ? 1280 : cpu ? 640 : 960;
+  const h = hi ? 720 : cpu ? 480 : 540;
   const videoConstraints = {
-    width: { ideal: hi ? 1280 : 960 },
-    height: { ideal: hi ? 720 : 540 },
-    frameRate: { ideal: 30, max: hi ? 60 : 30 },
+    width: { ideal: w },
+    height: { ideal: h },
+    frameRate: { ideal: cpu ? 24 : 30, max: hi ? 60 : 30 },
   };
   if (deviceId) {
     videoConstraints.deviceId = { exact: deviceId };
