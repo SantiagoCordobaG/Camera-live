@@ -9,7 +9,7 @@
 // IMPORTANTE: al publicar cambios en el shell, subí SHELL_VERSION. El navegador
 // solo detecta una actualización si cambia el contenido de este archivo.
 
-const SHELL_VERSION = "v3";
+const SHELL_VERSION = "v4";
 const SHELL_CACHE = `framefx-shell-${SHELL_VERSION}`;
 const RUNTIME_CACHE = "framefx-runtime-v1";
 
@@ -40,7 +40,10 @@ async function precache() {
 
   // cache: "reload" evita que el HTTP cache del navegador nos devuelva una
   // versión vieja justo cuando estamos instalando una nueva.
-  await Promise.all(
+  //
+  // allSettled: que un asset lento o caído no cancele la instalación entera.
+  // Si falta algo, el fetch normal lo trae y lo cachea en runtime.
+  const results = await Promise.allSettled(
     SHELL.map(async (asset) => {
       const response = await fetch(asset, { cache: "reload" });
       if (!response.ok) {
@@ -49,6 +52,10 @@ async function precache() {
       await cache.put(asset, response);
     })
   );
+
+  if (results.every((r) => r.status === "rejected")) {
+    throw new Error("No se pudo cachear ningún asset del shell");
+  }
 }
 
 self.addEventListener("install", (event) => {

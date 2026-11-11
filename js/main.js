@@ -1,7 +1,44 @@
-import {
-  HandLandmarker,
-  FilesetResolver,
-} from "../vendor/mediapipe/vision_bundle.mjs";
+// MediaPipe (134 KB de bundle + 9 MB de wasm + 7,5 MB de modelo) se carga de
+// forma perezosa: si el import fuera estático, la cámara —que necesita un clic
+// del usuario— quedaría esperando a que bajen 17 MB. Con red lenta eso es la
+// diferencia entre ver el prompt de permisos y no verlo nunca.
+//
+// Cada variante va completa y con la misma versión (0.10.14): bundle, wasm y
+// modelo. La variante de CDN existe para cuando el hosting tarda demasiado.
+const VISION_VARIANTS = [
+  {
+    id: "local",
+    module: new URL("../vendor/mediapipe/vision_bundle.mjs", import.meta.url).href,
+    wasm: new URL("../vendor/mediapipe/wasm", import.meta.url).href,
+    model: new URL("../vendor/models/hand_landmarker.task", import.meta.url).href,
+    gpuTimeout: 10000,
+    cpuTimeout: 75000,
+  },
+  {
+    id: "cdn",
+    module: "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs",
+    wasm: "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm",
+    model:
+      "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+    gpuTimeout: 12000,
+    cpuTimeout: 90000,
+  },
+];
+
+const visionCache = new Map();
+
+function loadVision(variant) {
+  if (!visionCache.has(variant.id)) {
+    const p = import(variant.module).catch((err) => {
+      // Permite reintentar más tarde si fue un fallo de red.
+      visionCache.delete(variant.id);
+      throw err;
+    });
+    visionCache.set(variant.id, p);
+  }
+  return visionCache.get(variant.id);
+}
+
 import { baseVert, baseFrag, fxFragSource } from "./shaders.js";
 import { createDemo } from "./demo.js";
 import { initPWA, setAppActive } from "./pwa.js";
@@ -17,9 +54,6 @@ const octx = overlay.getContext("2d");
 
 const params = new URLSearchParams(location.search);
 const IS_DEMO = params.has("demo");
-
-const WASM_PATH = new URL("../vendor/mediapipe/wasm", import.meta.url).href;
-const MODEL_PATH = new URL("../vendor/models/hand_landmarker.task", import.meta.url).href;
 
 /* --------------------------------------------------------------- calidad */
 // En el teléfono lo que más pesa es el fill-rate del shader, la resolución
@@ -83,6 +117,7 @@ const state = {
   lastDetectError: null,
   trackerDelegate: null,
   trackerError: null,
+  trackerLoading: false,
 
   W: 1280,
   H: 720,
@@ -708,7 +743,7 @@ function updateHint() {
     return;
   }
   const idle = !state.demo && !state.target && performance.now() - state.lastQuadAt > 1600;
-  hint.hidden = !idle;
+  hint.hidden = !idle || (!state.demo && !state.landmarker);
 }
 
 function updateStatus(now) {
@@ -721,6 +756,12 @@ function updateStatus(now) {
     setStatus("frozen", "Congelado");
   } else if (state.demo) {
     setStatus("tracking", `Demo · ${fps} fps`);
+  } else if (!state.landmarker) {
+    // El tracker se carga aparte: la cámara ya está en vivo igual.
+    setStatus(
+      "live",
+      state.trackerLoading ? "En vivo · cargando manos…" : "En vivo · sin manos"
+    );
   } else if (state.quad && state.presence > 0.5) {
     setStatus("tracking", `Marco activo · ${fps} fps`);
   } else {
@@ -867,7 +908,7 @@ function withTimeout(promise, ms, label) {
   });
 }
 
-function createLandmarker(fileset, options, delegate, timeoutMs) {
+function createLandmarker(HandLandmarker, fileset, options, delegate, model, timeoutMs) {
   return new Promise((resolve, reject) => {
     let settled = false;
 
@@ -885,7 +926,7 @@ function createLandmarker(fileset, options, delegate, timeoutMs) {
 
     HandLandmarker.createFromOptions(fileset, {
       ...options,
-      baseOptions: { modelAssetPath: MODEL_PATH, delegate },
+      baseOptions: { modelAssetPath: model, delegate },
     }).then(
       (tracker) => {
         if (settled) {
@@ -911,23 +952,11 @@ function createLandmarker(fileset, options, delegate, timeoutMs) {
   });
 }
 
+// Devuelve true si logró cargar el tracker; nunca deja el tracker a medias.
 async function ensureTracker() {
-  if (state.landmarker) return;
+  if (state.landmarker) return true;
 
-  setStatus("loading", "Cargando runtime…");
   state.trackerError = null;
-
-  let fileset;
-  try {
-    fileset = await withTimeout(
-      FilesetResolver.forVisionTasks(WASM_PATH),
-      25000,
-      "El runtime de MediaPipe"
-    );
-  } catch (err) {
-    state.trackerError = String((err && err.message) || err);
-    throw err;
-  }
 
   const options = {
     runningMode: "VIDEO",
@@ -945,42 +974,79 @@ async function ensureTracker() {
 
   let lastError = null;
 
-  for (const delegate of delegates) {
-    if (delegate === "GPU") {
-      setStatus("loading", "Cargando tracker (GPU)…");
-    } else if (lastError) {
-      setStatus("loading", "GPU no disponible · usando CPU…");
-    } else {
-      setStatus("loading", "Cargando tracker…");
-    }
+  for (const variant of VISION_VARIANTS) {
+    let vision;
+
+    setStatus(
+      "loading",
+      variant.id === "local" ? "Cargando tracker…" : "Cargando tracker (CDN)…"
+    );
 
     try {
-      state.landmarker = await createLandmarker(
-        fileset,
-        options,
-        delegate,
-        delegate === "GPU" ? 9000 : 45000
-      );
-      state.trackerDelegate = delegate;
-      state.trackerError = null;
-      console.info(`[FRAME FX] tracker listo con ${delegate}`);
-      return;
+      vision = await loadVision(variant);
     } catch (err) {
       lastError = err;
       state.trackerError = String((err && err.message) || err);
-      console.warn(`[FRAME FX] tracker ${delegate} falló`, err);
+      console.warn(`[FRAME FX] no se pudo cargar el runtime ${variant.id}`, err);
+      continue;
+    }
 
+    const { HandLandmarker, FilesetResolver } = vision;
+    let fileset;
+
+    try {
+      fileset = await withTimeout(
+        FilesetResolver.forVisionTasks(variant.wasm),
+        variant.gpuTimeout,
+        "El runtime de MediaPipe"
+      );
+    } catch (err) {
+      lastError = err;
+      state.trackerError = String((err && err.message) || err);
+      console.warn(`[FRAME FX] wasm ${variant.id} falló`, err);
+      continue;
+    }
+
+    for (const delegate of delegates) {
       if (delegate === "GPU") {
-        toast("GPU no disponible · probando CPU", 2200);
-        // Damos un respiro para que Safari libere el contexto WebGL fallido.
-        await new Promise((resolve) => setTimeout(resolve, 250));
+        setStatus("loading", "Cargando tracker (GPU)…");
+      } else if (lastError) {
+        setStatus("loading", "GPU no disponible · usando CPU…");
+      } else {
+        setStatus("loading", "Cargando tracker (CPU)…");
+      }
+
+      try {
+        state.landmarker = await createLandmarker(
+          HandLandmarker,
+          fileset,
+          options,
+          delegate,
+          variant.model,
+          delegate === "GPU" ? variant.gpuTimeout : variant.cpuTimeout
+        );
+        state.trackerDelegate = delegate;
+        state.trackerError = null;
+        console.info(
+          `[FRAME FX] tracker listo con ${delegate} (${variant.id})`
+        );
+        return true;
+      } catch (err) {
+        lastError = err;
+        state.trackerError = String((err && err.message) || err);
+        console.warn(`[FRAME FX] tracker ${delegate} (${variant.id}) falló`, err);
+
+        if (delegate === "GPU") {
+          // Damos un respiro para que Safari libere el contexto WebGL fallido.
+          await new Promise((resolve) => setTimeout(resolve, 250));
+        }
       }
     }
   }
 
   throw new Error(
     lastError
-      ? `${lastError.message || lastError}. Probá recargar la página.`
+      ? `${lastError.message || lastError}.`
       : "El tracker no pudo iniciarse."
   );
 }
@@ -1011,7 +1077,11 @@ function cameraConstraints(deviceId) {
   // botella pasa a ser la inferencia y no tiene sentido alimentarla con más
   // píxeles de los que el modelo usa.
   const hi = quality().maxWidth >= 1100;
-  const cpu = state.trackerDelegate === "CPU";
+  // Antes de que el tracker termine de cargar, en Safari/iOS ya sabemos que va
+  // a ser CPU: pedimos la resolución baja desde el principio.
+  const cpu =
+    state.trackerDelegate === "CPU" ||
+    (!state.trackerDelegate && (IS_SAFARI || params.has("cpu")));
   const w = hi ? 1280 : cpu ? 640 : 960;
   const h = hi ? 720 : cpu ? 480 : 540;
   const videoConstraints = {
@@ -1137,6 +1207,32 @@ async function switchCamera(deviceId) {
 
 /* --------------------------------------------------------------- booting */
 
+// El tracker se carga en segundo plano: la cámara ya está en vivo y el filtro
+// funciona igual, solo que sin detección de manos hasta que termine.
+async function startTracker() {
+  if (state.demo || state.landmarker || state.trackerLoading) return;
+  state.trackerLoading = true;
+
+  try {
+    await ensureTracker();
+    if (state.running) toast("Manos detectadas · ya podés hacer el marco", 2600);
+  } catch (err) {
+    console.error(err);
+    state.trackerError = String((err && err.message) || err);
+    // No tapamos la cámara: el aviso es informativo y se puede reintentar.
+    showError(
+      "La cámara funciona, faltan las manos",
+      `No se pudo cargar el detector de manos${
+        IS_IOS ? " (iOS)" : ""
+      }. La cámara y los efectos siguen andando sin el marco. Detalle: ${
+        state.trackerError
+      }`
+    );
+  } finally {
+    state.trackerLoading = false;
+  }
+}
+
 async function boot(mode) {
   if (state.running || state.starting) return;
   state.starting = true;
@@ -1154,8 +1250,8 @@ async function boot(mode) {
       state.source = state.feed.canvas;
       resize(state.feed.canvas.width, state.feed.canvas.height);
     } else {
-      setStatus("loading", "Cargando tracker…");
-      await ensureTracker();
+      // Primero la cámara: el permiso del navegador sale enseguida, en el mismo
+      // clic, y el video se ve aunque el tracker tarde minutos en bajar.
       setStatus("loading", "Pidiendo cámara…");
       await startCamera();
       state.source = video;
@@ -1172,6 +1268,7 @@ async function boot(mode) {
 
     setStatus("live", "En vivo");
     if (mode === "demo") toast("Modo demo · sin cámara");
+    else startTracker();
   } catch (err) {
     console.error(err);
     const denied =
@@ -1186,14 +1283,10 @@ async function boot(mode) {
         "No encontramos una cámara",
         "Conectá una cámara o probá el modo demo para ver el efecto."
       );
-    } else if (state.trackerError) {
+    } else if (err && err.name === "NotReadableError") {
       showError(
-        "El tracker no arrancó",
-        `MediaPipe no pudo iniciarse en este dispositivo${
-          IS_IOS ? " (iOS)" : ""
-        }. Probá recargar, abrir la app con ?cpu o usar el modo demo. Detalle: ${
-          state.trackerError
-        }`
+        "La cámara está ocupada",
+        "Otra app (OBS, Zoom, una pestaña) la está usando. Cerrala y reintentá."
       );
     } else {
       showError(
@@ -1258,6 +1351,10 @@ $("btnErrorClose").addEventListener("click", () => {
 
 $("btnErrorRetry").addEventListener("click", () => {
   $("errorCard").hidden = true;
+  if (state.running && !state.landmarker) {
+    startTracker();
+    return;
+  }
   if (!state.running && !state.starting) boot("camera");
 });
 

@@ -59,6 +59,17 @@ porque el GPU puede quedarse esperando sin lanzar error. Si igual no arranca:
 `?gpu` fuerza el delegate GPU para comparar. El detalle del fallo aparece en la
 tarjeta de error y en `?debug` (`window.__fx.trackerError`).
 
+### La cámara arranca antes que el tracker
+
+El clic en **Activar cámara** pide `getUserMedia` de inmediato y recién después
+baja el tracker en segundo plano. El detector pesa ~17 MB (wasm + modelo), así
+que con red lenta la app se usa igual: los efectos andan sin detección de manos
+y el marco aparece cuando termina la descarga.
+
+Si los archivos locales de `vendor/` no llegan en el tiempo previsto, la app
+reintenta con la misma versión (0.10.14) desde jsDelivr y Google Storage. Se ve
+en consola: `tracker listo con GPU (cdn)`.
+
 ### iPhone como cámara (OBS + LensLink)
 
 La app toma cualquier fuente que el sistema exponga como webcam, así que el
