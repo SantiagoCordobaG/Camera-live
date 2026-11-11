@@ -11,8 +11,8 @@ const VISION_VARIANTS = [
     module: new URL("../vendor/mediapipe/vision_bundle.mjs", import.meta.url).href,
     wasm: new URL("../vendor/mediapipe/wasm", import.meta.url).href,
     model: new URL("../vendor/models/hand_landmarker.task", import.meta.url).href,
-    gpuTimeout: 10000,
-    cpuTimeout: 75000,
+    gpuTimeout: 25000,
+    cpuTimeout: 90000,
   },
   {
     id: "cdn",
@@ -20,8 +20,8 @@ const VISION_VARIANTS = [
     wasm: "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm",
     model:
       "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
-    gpuTimeout: 12000,
-    cpuTimeout: 90000,
+    gpuTimeout: 25000,
+    cpuTimeout: 120000,
   },
 ];
 
