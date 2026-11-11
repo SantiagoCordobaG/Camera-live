@@ -33,8 +33,8 @@ const WEAK_DEVICE =
 
 const TIERS = {
   high: { renderScale: 1, maxWidth: 1440, taps: 8, detectMs: 33, glow: true, dprCap: 2 },
-  mid: { renderScale: 0.9, maxWidth: 960, taps: 5, detectMs: 42, glow: true, dprCap: 2 },
-  low: { renderScale: 0.72, maxWidth: 760, taps: 3, detectMs: 55, glow: false, dprCap: 1.5 },
+  mid: { renderScale: 1, maxWidth: 960, taps: 5, detectMs: 45, glow: true, dprCap: 2 },
+  low: { renderScale: 0.75, maxWidth: 760, taps: 3, detectMs: 66, glow: false, dprCap: 1.5 },
 };
 const TIER_ORDER = ["low", "mid", "high"];
 
