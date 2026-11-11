@@ -46,6 +46,19 @@ La app es instalable y queda disponible **offline** después de la primera carga
 > Al publicar cambios, subí `SHELL_VERSION` en `sw.js`. El navegador solo busca
 > una versión nueva del service worker si cambia ese archivo.
 
+### Si en iPhone queda en “Cargando tracker”
+
+En Safari/iOS la app usa automáticamente el delegate **CPU** de MediaPipe,
+porque el GPU puede quedarse esperando sin lanzar error. Si igual no arranca:
+
+1. Abrí la app con `?cpu` para forzar CPU explícitamente.
+2. Abrí `?reset` para borrar service worker y caches, y volvé a intentar.
+3. Actualizá iOS/Safari.
+4. Mientras tanto, `?demo` funciona sin tracker.
+
+`?gpu` fuerza el delegate GPU para comparar. El detalle del fallo aparece en la
+tarjeta de error y en `?debug` (`window.__fx.trackerError`).
+
 ### iPhone como cámara (OBS + LensLink)
 
 La app toma cualquier fuente que el sistema exponga como webcam, así que el

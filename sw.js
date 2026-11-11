@@ -9,7 +9,7 @@
 // IMPORTANTE: al publicar cambios en el shell, subí SHELL_VERSION. El navegador
 // solo detecta una actualización si cambia el contenido de este archivo.
 
-const SHELL_VERSION = "v1";
+const SHELL_VERSION = "v2";
 const SHELL_CACHE = `framefx-shell-${SHELL_VERSION}`;
 const RUNTIME_CACHE = "framefx-runtime-v1";
 

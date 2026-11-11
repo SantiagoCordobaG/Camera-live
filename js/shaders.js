@@ -40,7 +40,7 @@ export const baseFrag = /* glsl */ `
   }
 `;
 
-export const fxFrag = /* glsl */ `
+const fxFragBody = /* glsl */ `
   precision highp float;
 
   varying vec2 vScreen;
@@ -187,8 +187,8 @@ export const fxFrag = /* glsl */ `
     float dir = hash21(vec2(floor(s.y * 130.0), 11.0)) > 0.5 ? 1.0 : -1.0;
     vec3 streak = vec3(0.0);
     float wsum = 0.0;
-    for (int i = 0; i < 8; i++) {
-      float fi = float(i) / 7.0;
+    for (int i = 0; i < STREAK_TAPS; i++) {
+      float fi = float(i) / float(STREAK_TAPS - 1);
       float off = fi * fi * 0.22 * amt * dir;
       float w = 1.0 - fi * 0.6;
       streak += videoAt(q + vec2(off, 0.0)) * w;
@@ -296,3 +296,14 @@ export const fxFrag = /* glsl */ `
     gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
   }
 `;
+
+// El bucle de estelas (STREAK_TAPS muestras de textura por píxel) es la parte
+// más cara del shader. En pantallas chicas compilamos una variante con menos
+// muestras: el look se mantiene y el costo de fill-rate baja casi a la mitad.
+// El tope del for tiene que ser una constante, por eso se inyecta acá.
+export function fxFragSource(taps = 8) {
+  const n = Math.max(2, Math.min(16, Math.round(taps)));
+  return `#define STREAK_TAPS ${n}\n` + fxFragBody;
+}
+
+export const fxFrag = fxFragSource(8);

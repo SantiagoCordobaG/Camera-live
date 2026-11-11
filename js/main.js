@@ -2,7 +2,7 @@ import {
   HandLandmarker,
   FilesetResolver,
 } from "../vendor/mediapipe/vision_bundle.mjs";
-import { baseVert, baseFrag, fxFrag } from "./shaders.js";
+import { baseVert, baseFrag, fxFragSource } from "./shaders.js";
 import { createDemo } from "./demo.js";
 import { initPWA, setAppActive } from "./pwa.js";
 
@@ -20,6 +20,34 @@ const IS_DEMO = params.has("demo");
 
 const WASM_PATH = new URL("../vendor/mediapipe/wasm", import.meta.url).href;
 const MODEL_PATH = new URL("../vendor/models/hand_landmarker.task", import.meta.url).href;
+
+/* --------------------------------------------------------------- calidad */
+// En el teléfono lo que más pesa es el fill-rate del shader, la resolución
+// interna y la subida de textura desde la cámara. Estos perfiles bajan todo
+// eso sin cambiar el look.
+const COARSE = window.matchMedia("(pointer: coarse)").matches;
+const SMALL_SCREEN = Math.min(screen.width, screen.height) <= 820;
+const WEAK_DEVICE =
+  (navigator.hardwareConcurrency || 8) <= 4 ||
+  (navigator.deviceMemory || 8) <= 4;
+
+const TIERS = {
+  high: { renderScale: 1, maxWidth: 1440, taps: 8, detectMs: 33, glow: true, dprCap: 2 },
+  mid: { renderScale: 0.9, maxWidth: 960, taps: 5, detectMs: 42, glow: true, dprCap: 2 },
+  low: { renderScale: 0.72, maxWidth: 760, taps: 3, detectMs: 55, glow: false, dprCap: 1.5 },
+};
+const TIER_ORDER = ["low", "mid", "high"];
+
+function pickTier() {
+  // ?q=low|mid|high fuerza un perfil (útil para comparar en el celular).
+  const forced = (params.get("q") || "").toLowerCase();
+  if (TIERS[forced]) return forced;
+  if (COARSE || SMALL_SCREEN) return WEAK_DEVICE ? "low" : "mid";
+  return WEAK_DEVICE ? "mid" : "high";
+}
+
+let tierName = pickTier();
+const quality = () => TIERS[tierName];
 
 const state = {
   running: false,
@@ -53,13 +81,30 @@ const state = {
   detectCount: 0,
   lastHands: 0,
   lastDetectError: null,
+  trackerDelegate: null,
+  trackerError: null,
 
   W: 1280,
   H: 720,
+  srcW: 1280,
+  srcH: 720,
   fps: 60,
   lastFrame: performance.now(),
   lastStatusAt: 0,
   lastHintAt: 0,
+
+  // Subida de textura: solo cuando la cámara entrega un cuadro nuevo.
+  videoDirty: true,
+  lastUploadTime: -1,
+
+  // Degradado adaptativo si el equipo no llega a 24 fps.
+  startedAt: 0,
+  slowSince: 0,
+
+  capture: {
+    photo: false,
+    record: false,
+  },
 
   rec: {
     active: false,
@@ -76,10 +121,16 @@ const state = {
 
 const gl = canvas.getContext("webgl", {
   alpha: false,
-  antialias: true,
+  // MSAA no aporta nada acá (un quad a pantalla completa con textura lineal) y
+  // en móvil cuesta caro.
+  antialias: false,
   depth: false,
   stencil: false,
-  preserveDrawingBuffer: true,
+  // preserveDrawingBuffer obliga a la GPU a conservar una copia del buffer en
+  // cada frame; en teléfonos es una de las causas más grandes de trabazón.
+  // Las fotos y la grabación se resuelven copiando el canvas dentro del mismo
+  // frame, justo después de dibujar.
+  preserveDrawingBuffer: false,
   powerPreference: "high-performance",
 });
 
@@ -113,29 +164,41 @@ function makeProgram(vertSrc, fragSrc) {
   return p;
 }
 
-let baseProg, fxProg;
+let baseProg;
+let fxProg = null;
+let fxTaps = 0;
 let baseU, fxU, baseA, fxA;
+
+// Compila (o cambia) la variante del shader de efecto según el perfil activo.
+function buildFxProgram(taps) {
+  if (fxProg && fxTaps === taps) return;
+  const prog = makeProgram(baseVert, fxFragSource(taps));
+  if (fxProg) gl.deleteProgram(fxProg);
+  fxProg = prog;
+  fxTaps = taps;
+  fxU = {
+    uVideo: gl.getUniformLocation(prog, "uVideo"),
+    uRes: gl.getUniformLocation(prog, "uRes"),
+    uTime: gl.getUniformLocation(prog, "uTime"),
+    uMirror: gl.getUniformLocation(prog, "uMirror"),
+    uAmount: gl.getUniformLocation(prog, "uAmount"),
+    uStyle: gl.getUniformLocation(prog, "uStyle"),
+    uPresence: gl.getUniformLocation(prog, "uPresence"),
+  };
+  fxA = gl.getAttribLocation(prog, "aPos");
+}
 
 if (gl) {
   try {
     baseProg = makeProgram(baseVert, baseFrag);
-    fxProg = makeProgram(baseVert, fxFrag);
 
     baseU = {
       uVideo: gl.getUniformLocation(baseProg, "uVideo"),
       uMirror: gl.getUniformLocation(baseProg, "uMirror"),
     };
-    fxU = {
-      uVideo: gl.getUniformLocation(fxProg, "uVideo"),
-      uRes: gl.getUniformLocation(fxProg, "uRes"),
-      uTime: gl.getUniformLocation(fxProg, "uTime"),
-      uMirror: gl.getUniformLocation(fxProg, "uMirror"),
-      uAmount: gl.getUniformLocation(fxProg, "uAmount"),
-      uStyle: gl.getUniformLocation(fxProg, "uStyle"),
-      uPresence: gl.getUniformLocation(fxProg, "uPresence"),
-    };
     baseA = gl.getAttribLocation(baseProg, "aPos");
-    fxA = gl.getAttribLocation(fxProg, "aPos");
+
+    buildFxProgram(quality().taps);
   } catch (err) {
     console.error(err);
     showError("Error al iniciar el filtro", String(err.message || err));
@@ -158,6 +221,9 @@ const FULLSCREEN = new Float32Array([
   -1, -1, 1, -1, -1, 1,
   -1, 1, 1, -1, 1, 1,
 ]);
+
+// Reutilizado para los vértices del marco: evita alocar 12 floats por frame.
+const fxVerts = new Float32Array(12);
 
 /* --------------------------------------------------------------- helpers */
 
@@ -415,12 +481,31 @@ function updateFreeze(hands, now) {
 
 /* ------------------------------------------------------------------ render */
 
-function resize(w, h) {
-  // En pantallas chicas bajamos un poco la resolución interna del shader.
-  const maxW = window.matchMedia("(max-width: 700px)").matches ? 1100 : 1440;
-  const scale = Math.min(1, maxW / w);
-  state.W = Math.max(2, Math.round(w * scale));
-  state.H = Math.max(2, Math.round(h * scale));
+function resize(videoW, videoH) {
+  const vw = Math.round(videoW) || 1280;
+  const vh = Math.round(videoH) || 720;
+  state.srcW = vw;
+  state.srcH = vh;
+
+  // Presupuesto de píxeles a partir de lo que ocupa la imagen en pantalla:
+  // ancho visible (CSS) x DPR (con tope) x factor del perfil. Nunca por encima
+  // de la resolución real de la cámara.
+  const aspect = vw / vh;
+  const cssW = window.innerWidth || vw;
+  const cssH = window.innerHeight || vh;
+  const shownW = Math.min(cssW, cssH * aspect);
+  const dpr = Math.min(window.devicePixelRatio || 1, quality().dprCap);
+  const targetW = Math.min(
+    shownW * dpr * quality().renderScale,
+    quality().maxWidth,
+    vw
+  );
+  const scale = clamp(targetW / vw, 0.25, 1);
+  const oldW = state.W;
+  const oldH = state.H;
+
+  state.W = Math.max(2, Math.round(vw * scale));
+  state.H = Math.max(2, Math.round(vh * scale));
 
   canvas.width = state.W;
   canvas.height = state.H;
@@ -431,15 +516,51 @@ function resize(w, h) {
     state.rec.canvas.height = state.H;
   }
   if (gl) gl.viewport(0, 0, state.W, state.H);
+  state.videoDirty = true;
+
+  // Al cambiar la resolución interna, las coordenadas viejas del marco dejan
+  // de servir: forzamos una detección nueva.
+  if (state.W !== oldW || state.H !== oldH) {
+    state.quad = null;
+    state.target = null;
+    state.presence = 0;
+    state.frameActive = false;
+    state.lostFrames = 0;
+    state.lastVideoTime = -1;
+  }
 }
 
 function uploadTexture(source) {
+  if (!gl) return false;
   gl.bindTexture(gl.TEXTURE_2D, tex);
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
   try {
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+    return true;
   } catch (err) {
     // El video todavía no tiene un frame listo.
+    return false;
+  }
+}
+
+// Subir la textura es caro (copia el cuadro completo de la cámara a la GPU).
+// Si la cámara entrega 30 fps, no tiene sentido hacerlo 60 veces por segundo.
+function uploadIfNeeded() {
+  if (!state.source || !gl) return;
+
+  if (state.demo) {
+    uploadTexture(state.source);
+    return;
+  }
+  if (video.readyState < 2) return;
+
+  // requestVideoFrameCallback marca los cuadros nuevos; currentTime cubre a los
+  // navegadores que no lo tienen.
+  if (!state.videoDirty && video.currentTime === state.lastUploadTime) return;
+
+  if (uploadTexture(state.source)) {
+    state.videoDirty = false;
+    state.lastUploadTime = video.currentTime;
   }
 }
 
@@ -459,7 +580,7 @@ function drawFullscreen() {
 function drawFrameEffect(time) {
   const W = state.W;
   const H = state.H;
-  const verts = new Float32Array(12);
+  const verts = fxVerts;
   const order = [0, 1, 2, 0, 2, 3];
 
   order.forEach((idx, i) => {
@@ -493,7 +614,7 @@ function renderGL(time) {
 
   drawFullscreen();
 
-  if (state.quad && state.presence > 0.004) {
+  if (fxProg && state.quad && state.presence > 0.004) {
     drawFrameEffect(time);
   }
 }
@@ -526,8 +647,19 @@ function renderOverlay(time) {
 
   octx.strokeStyle = grad;
   octx.lineWidth = 2.4 * k;
-  octx.shadowColor = "rgba(190, 255, 90, 0.85)";
-  octx.shadowBlur = 26 * k;
+  if (quality().glow) {
+    octx.shadowColor = "rgba(190, 255, 90, 0.85)";
+    octx.shadowBlur = 26 * k;
+  } else {
+    // Glow "falso" sin shadowBlur (que es muy caro en móvil): el mismo trazo,
+    // más ancho y translúcido, debajo del principal.
+    octx.save();
+    octx.globalAlpha = a * 0.22;
+    octx.lineWidth = 12 * k;
+    octx.stroke();
+    octx.restore();
+    octx.lineWidth = 2.4 * k;
+  }
   octx.stroke();
 
   // Esquinas tipo visor.
@@ -596,6 +728,48 @@ function updateStatus(now) {
   }
 }
 
+/* ------------------------------------------------- ajuste automático */
+
+function applyQuality() {
+  document.body.classList.toggle("is-lite", tierName === "low");
+  if (gl && baseProg) {
+    try {
+      buildFxProgram(quality().taps);
+    } catch (err) {
+      console.warn("No se pudo compilar el shader liviano", err);
+    }
+  }
+  resize(state.srcW, state.srcH);
+}
+
+// Si el equipo no sostiene ~24 fps durante unos segundos, bajamos un escalón.
+// Solo se baja, nunca se sube: así no oscila entre perfiles.
+function adaptQuality(now) {
+  if (params.has("q") || state.demo) return;
+  if (tierName === "low") return;
+  if (now - state.startedAt < 4000) return;
+
+  if (state.fps >= 24) {
+    if (state.fps > 30) state.slowSince = 0;
+    return;
+  }
+  if (!state.slowSince) {
+    state.slowSince = now;
+    return;
+  }
+  if (now - state.slowSince < 2500) return;
+
+  const i = TIER_ORDER.indexOf(tierName);
+  if (i <= 0) return;
+
+  tierName = TIER_ORDER[i - 1];
+  state.slowSince = 0;
+  state.startedAt = now; // margen para que se estabilice el perfil nuevo
+  applyQuality();
+  toast("Ajustando calidad para mantener el ritmo", 2200);
+  console.info("[framefx] perfil de calidad:", tierName);
+}
+
 function loop(now) {
   requestAnimationFrame(loop);
   if (!state.running) return;
@@ -614,7 +788,10 @@ function loop(now) {
   } else if (state.landmarker && video.readyState >= 2) {
     // Mientras está congelado seguimos detectando manos: es la única forma de
     // saber cuándo se abren para volver al vivo.
-    if (video.currentTime !== state.lastVideoTime && now - state.lastDetect > 26) {
+    if (
+      video.currentTime !== state.lastVideoTime &&
+      now - state.lastDetect > quality().detectMs
+    ) {
       state.lastVideoTime = video.currentTime;
       state.lastDetect = now;
       state.detectCount++;
@@ -632,10 +809,7 @@ function loop(now) {
 
   if (!state.frozen) {
     stepQuad(dt);
-
-    if (state.source) {
-      if (state.demo || video.readyState >= 2) uploadTexture(state.source);
-    }
+    uploadIfNeeded();
   }
 
   // El shader y el overlay comparten el reloj congelado para que el cuadro
@@ -649,18 +823,112 @@ function loop(now) {
     state.rec.ctx.drawImage(overlay, 0, 0);
   }
 
+  // Fotos y arranque de grabación se resuelven acá, con el buffer recién
+  // dibujado (el contexto ya no conserva el buffer entre frames).
+  flushCapture();
+
   updateHint();
   updateStatus(now);
+  adaptQuality(now);
 }
 
 requestAnimationFrame(loop);
 
 /* ------------------------------------------------------------- detection */
 
+const IS_IOS =
+  /iphone|ipad|ipod/i.test(navigator.userAgent) ||
+  (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+
+// En Safari (iOS incluido) el delegate GPU de MediaPipe puede quedarse
+// esperando para siempre al crear el landmarker. Preferimos CPU, que es más
+// lento pero confiable, y dejamos ?gpu para forzarlo si hace falta.
+const IS_SAFARI =
+  IS_IOS ||
+  (/safari/i.test(navigator.userAgent) &&
+    !/chrome|chromium|crios|fxios|edg/i.test(navigator.userAgent));
+
+function withTimeout(promise, ms, label) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`${label} tardó más de ${Math.round(ms / 1000)} s`)),
+      ms
+    );
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
+}
+
+function createLandmarker(fileset, options, delegate, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(
+        new Error(
+          `El tracker (${delegate}) no respondió en ${Math.round(
+            timeoutMs / 1000
+          )} s`
+        )
+      );
+    }, timeoutMs);
+
+    HandLandmarker.createFromOptions(fileset, {
+      ...options,
+      baseOptions: { modelAssetPath: MODEL_PATH, delegate },
+    }).then(
+      (tracker) => {
+        if (settled) {
+          // Llegó después del timeout: liberamos el recurso.
+          try {
+            tracker.close();
+          } catch (err) {
+            /* sin problema */
+          }
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        resolve(tracker);
+      },
+      (err) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
+}
+
 async function ensureTracker() {
   if (state.landmarker) return;
 
-  const fileset = await FilesetResolver.forVisionTasks(WASM_PATH);
+  setStatus("loading", "Cargando runtime…");
+  state.trackerError = null;
+
+  let fileset;
+  try {
+    fileset = await withTimeout(
+      FilesetResolver.forVisionTasks(WASM_PATH),
+      25000,
+      "El runtime de MediaPipe"
+    );
+  } catch (err) {
+    state.trackerError = String((err && err.message) || err);
+    throw err;
+  }
+
   const options = {
     runningMode: "VIDEO",
     numHands: 2,
@@ -669,23 +937,67 @@ async function ensureTracker() {
     minTrackingConfidence: 0.3,
   };
 
-  try {
-    state.landmarker = await HandLandmarker.createFromOptions(fileset, {
-      ...options,
-      baseOptions: { modelAssetPath: MODEL_PATH, delegate: "GPU" },
-    });
-  } catch (err) {
-    console.warn("GPU delegate no disponible, usando CPU.", err);
-    state.landmarker = await HandLandmarker.createFromOptions(fileset, {
-      ...options,
-      baseOptions: { modelAssetPath: MODEL_PATH, delegate: "CPU" },
-    });
+  const delegates = params.has("gpu")
+    ? ["GPU", "CPU"]
+    : params.has("cpu") || IS_SAFARI
+      ? ["CPU"]
+      : ["GPU", "CPU"];
+
+  let lastError = null;
+
+  for (const delegate of delegates) {
+    if (delegate === "GPU") {
+      setStatus("loading", "Cargando tracker (GPU)…");
+    } else if (lastError) {
+      setStatus("loading", "GPU no disponible · usando CPU…");
+    } else {
+      setStatus("loading", "Cargando tracker…");
+    }
+
+    try {
+      state.landmarker = await createLandmarker(
+        fileset,
+        options,
+        delegate,
+        delegate === "GPU" ? 9000 : 45000
+      );
+      state.trackerDelegate = delegate;
+      state.trackerError = null;
+      console.info(`[FRAME FX] tracker listo con ${delegate}`);
+      return;
+    } catch (err) {
+      lastError = err;
+      state.trackerError = String((err && err.message) || err);
+      console.warn(`[FRAME FX] tracker ${delegate} falló`, err);
+
+      if (delegate === "GPU") {
+        toast("GPU no disponible · probando CPU", 2200);
+        // Damos un respiro para que Safari libere el contexto WebGL fallido.
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+    }
   }
+
+  throw new Error(
+    lastError
+      ? `${lastError.message || lastError}. Probá recargar la página.`
+      : "El tracker no pudo iniciarse."
+  );
 }
 
 /* ---------------------------------------------------------------- camera */
 
 const cameraSelect = $("camera");
+
+// Avisa cuándo hay un cuadro nuevo de cámara: así no subimos la textura 60
+// veces por segundo para un video que entrega 30.
+if (typeof video.requestVideoFrameCallback === "function") {
+  const onVideoFrame = () => {
+    state.videoDirty = true;
+    video.requestVideoFrameCallback(onVideoFrame);
+  };
+  video.requestVideoFrameCallback(onVideoFrame);
+}
 
 function cameraName(device, index) {
   const label = (device.label || "").trim();
@@ -693,10 +1005,13 @@ function cameraName(device, index) {
 }
 
 function cameraConstraints(deviceId) {
+  // En el celular pedimos 960x540 / 30 fps: alcanza de sobra para detectar
+  // manos y baja a la mitad el costo de subir la textura a la GPU.
+  const hi = quality().maxWidth >= 1100;
   const videoConstraints = {
-    width: { ideal: 1280 },
-    height: { ideal: 720 },
-    frameRate: { ideal: 30, max: 60 },
+    width: { ideal: hi ? 1280 : 960 },
+    height: { ideal: hi ? 720 : 540 },
+    frameRate: { ideal: 30, max: hi ? 60 : 30 },
   };
   if (deviceId) {
     videoConstraints.deviceId = { exact: deviceId };
@@ -841,6 +1156,7 @@ async function boot(mode) {
     }
 
     state.lastFrame = performance.now();
+    state.startedAt = performance.now();
     resetTracking();
     state.running = true;
 
@@ -863,6 +1179,15 @@ async function boot(mode) {
       showError(
         "No encontramos una cámara",
         "Conectá una cámara o probá el modo demo para ver el efecto."
+      );
+    } else if (state.trackerError) {
+      showError(
+        "El tracker no arrancó",
+        `MediaPipe no pudo iniciarse en este dispositivo${
+          IS_IOS ? " (iOS)" : ""
+        }. Probá recargar, abrir la app con ?cpu o usar el modo demo. Detalle: ${
+          state.trackerError
+        }`
       );
     } else {
       showError(
@@ -893,6 +1218,27 @@ if (navigator.mediaDevices?.addEventListener) {
 
 if (params.has("debug")) window.__fx = state;
 
+// Escape hatch para un service worker viejo o un cache roto:
+// abrí la app con ?reset y se limpia todo antes de recargar.
+if (params.has("reset")) {
+  (async () => {
+    try {
+      const regs = (await navigator.serviceWorker?.getRegistrations?.()) || [];
+      await Promise.all(regs.map((reg) => reg.unregister()));
+      if ("caches" in window) {
+        const keys = await caches.keys();
+        await Promise.all(keys.map((key) => caches.delete(key)));
+      }
+    } catch (err) {
+      console.warn("No se pudo limpiar el cache", err);
+    }
+
+    const next = new URL(location.href);
+    next.searchParams.delete("reset");
+    location.replace(next.toString());
+  })();
+}
+
 if (IS_DEMO) {
   boot("demo");
 } else if (params.has("autostart")) {
@@ -902,6 +1248,11 @@ if (IS_DEMO) {
 $("btnErrorClose").addEventListener("click", () => {
   $("errorCard").hidden = true;
   if (!state.running) $("start").classList.remove("is-hidden");
+});
+
+$("btnErrorRetry").addEventListener("click", () => {
+  $("errorCard").hidden = true;
+  if (!state.running && !state.starting) boot("camera");
 });
 
 document.querySelectorAll(".chip").forEach((chip) => {
@@ -968,6 +1319,9 @@ function restoreSettings() {
 }
 
 restoreSettings();
+
+// El perfil de calidad se elige antes de dibujar el primer frame.
+document.body.classList.toggle("is-lite", tierName === "low");
 
 $("btnMirror").addEventListener("click", () => {
   state.mirror = !state.mirror;
@@ -1060,6 +1414,13 @@ function toggleRecord() {
     return;
   }
 
+  // El arranque real se hace en flushCapture(), con el buffer recién pintado.
+  state.capture.record = true;
+}
+
+function beginRecording() {
+  if (!state.running || state.rec.active) return;
+
   const ctx2d = ensureRecCanvas();
   ctx2d.drawImage(canvas, 0, 0);
   ctx2d.drawImage(overlay, 0, 0);
@@ -1122,6 +1483,11 @@ $("btnRec").addEventListener("click", toggleRecord);
 
 function snapshot() {
   if (!state.running) return;
+  // Se resuelve en flushCapture(), dentro del frame que se acaba de dibujar.
+  state.capture.photo = true;
+}
+
+function savePhoto() {
   const c = document.createElement("canvas");
   c.width = state.W;
   c.height = state.H;
@@ -1137,10 +1503,33 @@ function snapshot() {
   }, "image/png");
 }
 
+function flushCapture() {
+  if (state.capture.photo) {
+    state.capture.photo = false;
+    savePhoto();
+  }
+  if (state.capture.record) {
+    state.capture.record = false;
+    beginRecording();
+  }
+}
+
 $("btnPhoto").addEventListener("click", snapshot);
 $("btnFreeze").addEventListener("click", toggleFreeze);
 
 /* ----------------------------------------------------------------- misc */
+
+// Al rotar el teléfono cambia el tamaño visible: recalculamos el buffer interno.
+let resizeTimer = 0;
+window.addEventListener("resize", () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    if (!state.running) return;
+    const vw = state.demo ? state.feed.canvas.width : video.videoWidth || state.srcW;
+    const vh = state.demo ? state.feed.canvas.height : video.videoHeight || state.srcH;
+    resize(vw, vh);
+  }, 220);
+});
 
 window.addEventListener("beforeunload", () => {
   setAppActive(false);

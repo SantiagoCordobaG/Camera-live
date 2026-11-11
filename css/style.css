@@ -422,6 +422,19 @@ body.ui-hidden .hint {
   margin-bottom: 16px;
 }
 
+.error-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.error-card__actions .btn {
+  flex: 1 1 auto;
+  min-height: 40px;
+  padding: 0 16px;
+  font-size: 12px;
+}
+
 /* ---------------------------------------------------------------- start */
 
 .start {
@@ -1190,4 +1203,68 @@ kbd {
     animation-iteration-count: 1 !important;
     transition-duration: 0.001ms !important;
   }
+}
+
+/* ------------------------------------------------------- modo rendimiento */
+/* Sobre un canvas que se repinta a 60 fps, cada backdrop-filter y cada capa
+   con mix-blend-mode obliga al navegador a recomponer media pantalla en cada
+   frame. En teléfono eso pesa más que el propio filtro: se cambian por fondos
+   casi opacos, que se ven igual. */
+@media (max-width: 820px), (pointer: coarse) {
+  .grain {
+    display: none;
+  }
+
+  .status,
+  .rec,
+  .freeze,
+  .hint,
+  .dock,
+  .update,
+  .error-card,
+  .modal__backdrop {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+
+  .status {
+    background: rgba(9, 11, 8, 0.82);
+  }
+
+  .dock {
+    background: rgba(10, 12, 9, 0.93);
+  }
+
+  .hint {
+    background: rgba(10, 13, 8, 0.93);
+  }
+
+  .update {
+    background: rgba(8, 12, 7, 0.94);
+  }
+
+  .start__bg {
+    filter: none;
+    opacity: 0.6;
+  }
+}
+
+body.is-lite .grain {
+  display: none;
+}
+
+body.is-lite .status,
+body.is-lite .rec,
+body.is-lite .freeze,
+body.is-lite .hint,
+body.is-lite .dock,
+body.is-lite .update,
+body.is-lite .error-card,
+body.is-lite .modal__backdrop {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+body.is-lite .dock {
+  background: rgba(10, 12, 9, 0.94);
 }
