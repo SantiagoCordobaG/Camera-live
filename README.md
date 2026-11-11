@@ -219,6 +219,22 @@ y en **Settings → Pages** elegí la rama `main` y la carpeta `/ (root)`.
 
 > HTTPS es obligatorio para la cámara y para instalar la PWA.
 
+### Probar sin cámara física
+
+Con Chrome/Chromium y sus dispositivos simulados alcanza para verificar que el
+permiso sale y que el video arranca:
+
+```bash
+google-chrome --use-fake-device-for-media-stream --use-fake-ui-for-media-stream \
+  --remote-debugging-port=9222 http://localhost:8123/?debug
+```
+
+(en Linux el binario puede llamarse `chromium`, `chromium-browser` o
+`google-chrome`). `window.__fx` (con `?debug`) expone `running`,
+`trackerLoading`, `trackerDelegate` y `trackerError`. Para simular red lenta de
+verdad hay que bloquear el service worker: con SW activo,
+`Network.emulateNetworkConditions` no frena los fetch del tracker.
+
 ---
 
 ## Estructura
