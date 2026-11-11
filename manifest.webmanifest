@@ -1,0 +1,64 @@
+{
+  "id": "./",
+  "name": "FRAME FX — marco glitch en vivo",
+  "short_name": "FRAME FX",
+  "description": "Formá un marco con las manos y adentro aparece una versión glitcheada de la realidad. Todo corre en tu equipo.",
+  "lang": "es",
+  "dir": "ltr",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#050604",
+  "theme_color": "#050604",
+  "categories": ["photo", "entertainment"],
+  "prefer_related_applications": false,
+  "icons": [
+    {
+      "src": "./icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "./icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "./icons/maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Probar demo",
+      "short_name": "Demo",
+      "description": "Ver el efecto sin cámara",
+      "url": "./?demo",
+      "icons": [
+        {
+          "src": "./icons/icon-192.png",
+          "sizes": "192x192",
+          "type": "image/png"
+        }
+      ]
+    },
+    {
+      "name": "Abrir cámara",
+      "short_name": "Cámara",
+      "description": "Activar la cámara directamente",
+      "url": "./?autostart",
+      "icons": [
+        {
+          "src": "./icons/icon-192.png",
+          "sizes": "192x192",
+          "type": "image/png"
+        }
+      ]
+    }
+  ]
+}
